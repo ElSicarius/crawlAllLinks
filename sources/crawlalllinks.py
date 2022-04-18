@@ -40,12 +40,32 @@ GARBAGE_EXTENSIONS = [
     "tgz",
     "xz",
 ]
+retrieved_links = set()
+
+class Handlers():
+    def __init__(self, new_headers={}):
+        self.new_headers = {k.lower(): v for k,v in new_headers.items()}
+
+    def request_handler(self, request):
+        for k, v in self.new_headers.items():
+            request.headers.setdefault(k, v)
+            request.headers[k] = self.new_headers[k]
+        asyncio.create_task(request.continue_({
+        "headers": {
+            **request.headers,
+        }
+    }))
+
 
 class Web():
-    def __init__(self, pyppeteer_args={"headless": True, "ignoreHTTPSErrors": True, "handleSIGTERM": False, "handleSIGINT": False, "devtools": True, "args": ['--no-sandbox']},):
+    def __init__(self, forced_headers = {}, 
+            pyppeteer_args={"headless": True, "ignoreHTTPSErrors": True, "handleSIGTERM": False, "handleSIGINT": False, "devtools": True, "args": ['--no-sandbox']},):
+            
         self.pyppeteer_args = pyppeteer_args
         self.pages = list()
         self.results = dict()
+        self.forced_headers = forced_headers
+        self.Handlers = Handlers(new_headers=forced_headers)
         self.mime_types = self.get_mime_types()
     
     def get_mime_types(self):
@@ -71,6 +91,13 @@ class Web():
     async def new_page(self):
         self.pages.append(await self.browser.newPage())
         id_ = len(self.pages) - 1
+        await self.pages[id_].setViewport({'width': 1920, 'height': 1080})
+        # set request handler to override headers when request
+        await self.pages[id_].setRequestInterception(True)
+        self.pages[id_].on("request", self.Handlers.request_handler)
+
+        self.pages[id_].setDefaultNavigationTimeout(15 * 1000)
+
         self.results.setdefault(id_, dict())
         return id_
     
@@ -111,33 +138,49 @@ class Crawl():
     async def visit_n_parse(self, id_, url):
         p = await self.web.page_goto(id_, url)
         if not p:
-            self.fails.add(url)
-            self.results_pages[url] = {
-                "status": "000",
-                "url": url,
-                "headers": {},
-                "len": 0,
-            }
+            self.add_failed({url})
         else:
-            self.visited.add(url)
+            self.add_visited({url}, status=p.status, headers=p.headers)
         self.queue.discard(url)
         content = await self.web.get_page_content(id_)
-        self.results_pages[url] = {
-                "status": p.status,
-                "url": p.url,
-                "headers": p.headers,
-                "len": len(content),
-            }
+        self.results_pages[url]["len"] = len(content)
         with open(f"/tmp/crawlalllinks/{id_}.txt", "w") as f:
             f.write(content)
         links = self.find_all_links_v2(id_)
-        self.web.results[id_]["links"] = links
-        return links
+        for link in links.splitlines():
+            retrieved_links.add(link)
+        return set(links.splitlines())
     
     def add_queue(self, links: set):
         for link in links:
             if link not in self.visited and link not in self.fails :
                 self.queue.add(link)
+                self.results_pages.setdefault(link, dict({
+                "status": 0,
+                "url": link,
+                "headers": {},
+                "len": 0,
+            }))
+    
+    def add_visited(self, links: set, status: int=0, headers: dict={}, len_: int=0):
+        for link in links:
+            self.results_pages[link] = {
+                "status": status,
+                "url": link,
+                "headers": headers,
+                "len": len_,
+            }
+            self.visited.add(link)
+    
+    def add_failed(self, links: set, status: int=0, headers: dict={}, len_: int=0):
+        for link in links:
+            self.results_pages[link] = {
+                "status": status,
+                "url": link,
+                "headers": headers,
+                "len": len_,
+            }
+            self.fails.add(link)
     
     def print_status(self):
         print(self)
@@ -200,9 +243,16 @@ class Link(object):
             return True
         return False
 
+def load_headers(headers_string):
+    headers = {}
+
+    for header in headers_string:
+        header_name, value = header.split(": ")
+        headers[header_name] = value
+    return headers
 
 async def main(args):
-    veb = Web()
+    veb = Web(load_headers(args.header))
     crawler = Crawl(web=veb, url=args.url)
 
     init_url_parsed = urlparse(args.url)
@@ -211,17 +261,21 @@ async def main(args):
     def signal_handler(sig, frame):
         logger.warning(f"Caught ctrl+c, saving results...")
         crawler.write_results()
+        print("================= links ===================")
+        print("\n".join(sorted(retrieved_links)))
+        print("================= results ===================")
         print(crawler.return_results_formatted())
+        
         exit(1)
         
     signal.signal(signal.SIGINT, signal_handler)
 
     id_ = await veb.new_page()
-    await crawler.visit_n_parse(id_, crawler.init_url)
+    links = await crawler.visit_n_parse(id_, crawler.init_url)
     
-    def get_next_urls():
+    def get_next_urls(links):
         urls = set()
-        for link in veb.results[id_]["links"].split("\n"):
+        for link in links:
             link = link.strip()
             if link in veb.mime_types:
                 # logger.warning(f"Link looks like a mime type: {link}, ignoring")
@@ -250,20 +304,23 @@ async def main(args):
             if args.mode == "lax":
                 urls.add(full_url)
         return urls
-    
-    crawler.add_queue(get_next_urls())
+    next_urls = get_next_urls(links)
+    crawler.add_queue(next_urls)
     logger.debug("Init page crawled, crawling subpages now")
     while len(crawler.queue) > 0 and len(crawler.fails) < args.max_fails and len(crawler.visited | crawler.fails) < args.max_visits:
         url = crawler.queue.pop()
         logger.debug(f"Next page to crawl: {url}")
 
-        await crawler.visit_n_parse(id_, url)
-        crawler.add_queue(get_next_urls())
+        links = await crawler.visit_n_parse(id_, url)
+        crawler.add_queue(get_next_urls(links))
         crawler.print_status()
     
     await veb.close_browser()
 
     crawler.write_results()
+    print("================= links ===================")
+    print("\n".join(sorted(retrieved_links)))
+    print("================= results ===================")
     print(crawler.return_results_formatted())
 
 def get_arguments():
@@ -272,6 +329,7 @@ def get_arguments():
     parser.add_argument("--max-fails", type=int, help="max fails before stopping", default=10)
     parser.add_argument("--max-visits", type=int, help="max visits before stopping", default=100)
     parser.add_argument("-m", "--mode", type=str, help="Crawling mode", default="sub", choices=["sub", "lax", "strict"])
+    parser.add_argument("-H", "--header", type=str, help="Headers to send", action='append', default=[])
 
     return parser.parse_args()
 

@@ -14,11 +14,13 @@ COPY requirements.txt /crawlalllinks/
 
 RUN pip install -r /crawlalllinks/requirements.txt
 
+RUN pyppeteer-install
+
 COPY sources/* /crawlalllinks/sources/
 
 WORKDIR /crawlalllinks/sources
 
-RUN pyppeteer-install
+
 
 #ENTRYPOINT ["/bin/bash"]
 ENTRYPOINT ["python3","crawlalllinks.py"]
