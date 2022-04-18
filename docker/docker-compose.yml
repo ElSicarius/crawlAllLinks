@@ -1,0 +1,9 @@
+version: "3.3"
+services:
+  crawl_all_links:
+    build:
+      context: ../
+      dockerfile: docker/Dockerfile
+    image: crawl_all_links:latest
+    privileged: False
+    
