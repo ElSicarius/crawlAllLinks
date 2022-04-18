@@ -7,6 +7,8 @@ import re
 import requests
 import argparse
 import os
+import signal
+import sys
 
 findAllLinksv2= '''"(?:\\"|')([\w]{2,10}:[\\\/]+[\w\d\*\_\-\.\:]+)?((([\\\/]+)([\.\w\d\_\-\:]+)((?![\.\w\d\_\-\:]+)[\\\/]+)?)+|(([\.\w\d\_\-\:]+)([\\\/]+)((?![\\\/]+)[\.\w\d\_\-\:]+)?)+)?(\?([\w\d\-\_\;{}()\[\]]+(\=([^&,\s]+(\&)?)?)?){0,})?(?:\\"|')"'''
 
@@ -74,12 +76,12 @@ class Web():
     
     async def page_goto(self, id, url):
         try:
-            await self.pages[id].goto(url, waitUntil="networkidle2")
+            p = await self.pages[id].goto(url, waitUntil="networkidle2")
         except Exception as e:
             logger.error(f"Error: {e}")
             return False
         self.results[id]["url"] = url
-        return True
+        return p
     
     async def get_page_content(self, id):
         body = await self.pages[id].content()
@@ -99,7 +101,7 @@ class Crawl():
         self.fails = set()
         self.visited = set()
         self.queue = set()
-
+        self.results_pages = dict()
         self.queue.add(url)
     
     def find_all_links_v2(self, id_):
@@ -107,12 +109,25 @@ class Crawl():
         return check_output(f"grep -Pao {findAllLinksv2} /tmp/crawlalllinks/{id_}.txt | sed \"s/[\\\"|']//g\"  | sort -uV", shell=True, executable='/bin/bash').decode("utf-8")
     
     async def visit_n_parse(self, id_, url):
-        if not await self.web.page_goto(id_, url):
+        p = await self.web.page_goto(id_, url)
+        if not p:
             self.fails.add(url)
+            self.results_pages[url] = {
+                "status": "000",
+                "url": url,
+                "headers": {},
+                "len": 0,
+            }
         else:
             self.visited.add(url)
         self.queue.discard(url)
         content = await self.web.get_page_content(id_)
+        self.results_pages[url] = {
+                "status": p.status,
+                "url": p.url,
+                "headers": p.headers,
+                "len": len(content),
+            }
         with open(f"/tmp/crawlalllinks/{id_}.txt", "w") as f:
             f.write(content)
         links = self.find_all_links_v2(id_)
@@ -127,11 +142,20 @@ class Crawl():
     def print_status(self):
         print(self)
     
+    def write_results(self):
+        with open(f"/tmp/crawlalllinks/results_{self.init_url.replace('/','_').replace(':','.')}.txt", "w+") as f:
+            f.write(self.return_results_formatted())
+    
     def __str__(self):
         cr = "\n"
-        return f"""Fails: {len(self.fails)} - {cr.join(self.fails)}
-Visited: {len(self.visited)} - {cr.join(self.visited)}
-Queue: {len(self.queue)} - {cr.join(self.queue)}"""
+        return f"""Fails: {len(self.fails)} - Visited: {len(self.visited)} - Queue: {len(self.queue)}"""
+
+    def return_results_formatted(self):
+        content = str()
+        res_sorted = {k: self.results_pages[k] for k in sorted(self.results_pages, key=lambda element: (self.results_pages[element]["status"], self.results_pages[element]["len"]))}
+        for url, response in res_sorted.items():
+            content += f"""{response["status"]} | {response["len"]} | {response["url"]}\n"""
+        return content
     
 class Link(object):
 
@@ -162,7 +186,8 @@ class Link(object):
         elif self.state == "path_absolute":
             self.recreated_link = urlunparse(self.full_url_parsed._replace(path=self.link))
         elif self.state == "path_relative":
-            self.recreated_link = urlunparse(self.full_url_parsed._replace(path=f'{self.full_url_parsed.path}/{self.link}'))
+            sep = "/" if not self.full_url_parsed.path.endswith("/") and not self.link.startswith("/") else ""
+            self.recreated_link = urlunparse(self.full_url_parsed._replace(path=f'{self.full_url_parsed.path}{sep}{self.link}'))
         return self.recreated_link
     
     def has_garbage_extension(self):
@@ -179,12 +204,21 @@ class Link(object):
 async def main(args):
     veb = Web()
     crawler = Crawl(web=veb, url=args.url)
+
     init_url_parsed = urlparse(args.url)
     await veb.start_browser()
 
+    def signal_handler(sig, frame):
+        logger.warning(f"Caught ctrl+c, saving results...")
+        crawler.write_results()
+        print(crawler.return_results_formatted())
+        exit(1)
+        
+    signal.signal(signal.SIGINT, signal_handler)
+
     id_ = await veb.new_page()
     await crawler.visit_n_parse(id_, crawler.init_url)
-
+    
     def get_next_urls():
         urls = set()
         for link in veb.results[id_]["links"].split("\n"):
@@ -229,7 +263,8 @@ async def main(args):
     
     await veb.close_browser()
 
-    print(crawler, file=open("/tmp/crawlalllinks/crawlalllinks.txt", "w+"))
+    crawler.write_results()
+    print(crawler.return_results_formatted())
 
 def get_arguments():
     parser = argparse.ArgumentParser(description="Crawl all links from a webpage")
