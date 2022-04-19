@@ -59,12 +59,14 @@ class Handlers():
 
 class Web():
     def __init__(self, forced_headers = {}, 
-            pyppeteer_args={"headless": True, "ignoreHTTPSErrors": True, "handleSIGTERM": False, "handleSIGINT": False, "devtools": True, "args": ['--no-sandbox']},):
+            timeout=30,
+            pyppeteer_args={"headless": True, "ignoreHTTPSErrors": True, "handleSIGTERM": False, "handleSIGINT": False, "executablePath": "/usr/bin/chromium-browser", "devtools": False, "args": ["--no-sandbox"]},):
             
         self.pyppeteer_args = pyppeteer_args
         self.pages = list()
         self.results = dict()
         self.forced_headers = forced_headers
+        self.timeout = timeout
         self.Handlers = Handlers(new_headers=forced_headers)
         self.mime_types = self.get_mime_types()
     
@@ -96,7 +98,7 @@ class Web():
         await self.pages[id_].setRequestInterception(True)
         self.pages[id_].on("request", self.Handlers.request_handler)
 
-        self.pages[id_].setDefaultNavigationTimeout(15 * 1000)
+        self.pages[id_].setDefaultNavigationTimeout(self.timeout * 1000)
 
         self.results.setdefault(id_, dict())
         return id_
@@ -252,7 +254,7 @@ def load_headers(headers_string):
     return headers
 
 async def main(args):
-    veb = Web(load_headers(args.header))
+    veb = Web(load_headers(args.header), timeout=args.timeout)
     crawler = Crawl(web=veb, url=args.url)
 
     init_url_parsed = urlparse(args.url)
@@ -330,11 +332,13 @@ def get_arguments():
     parser.add_argument("--max-visits", type=int, help="max visits before stopping", default=100)
     parser.add_argument("-m", "--mode", type=str, help="Crawling mode", default="sub", choices=["sub", "lax", "strict"])
     parser.add_argument("-H", "--header", type=str, help="Headers to send", action='append', default=[])
+    parser.add_argument("--timeout", type=int, help="Timeout for fetching web page", default=35)
 
     return parser.parse_args()
 
 
 if __name__ == "__main__":
+    logger.info("Starting crawler")
     if not os.path.exists("/tmp/crawlalllinks"):
         os.mkdir("/tmp/crawlalllinks")
     args = get_arguments()
