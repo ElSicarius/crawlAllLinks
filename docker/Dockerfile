@@ -1,7 +1,7 @@
 FROM zenika/alpine-chrome:latest
 
 USER root
-RUN apk add bash grep curl python3 python3-dev py3-pip 
+RUN apk add bash grep curl python3 python3-dev py3-pip pcre-tools
 
 
 RUN mkdir -p /crawlalllinks
