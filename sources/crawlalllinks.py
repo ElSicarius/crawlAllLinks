@@ -469,7 +469,7 @@ def get_arguments():
     parser.add_argument("-m", "--mode", type=str, help="Crawling mode", default="sub", choices=["sub", "lax", "strict"])
     parser.add_argument("-H", "--header", type=str, help="Headers to send", action='append', default=[])
     parser.add_argument("--timeout", type=int, help="Timeout for fetching web page", default=35)
-    parser.add_argument("--headless", help="Use a headless browser to run the crawler", action="store_true", default=False)
+    parser.add_argument("--chrome-headless", help="Use a headless browser to run the crawler", action="store_true", default=False)
 
     return parser.parse_args()
 
@@ -479,7 +479,7 @@ if __name__ == "__main__":
     if not os.path.exists("/tmp/crawlalllinks"):
         os.mkdir("/tmp/crawlalllinks")
     args = get_arguments()
-    if args.headless:
+    if args.chrome_headless:
         asyncio.get_event_loop().run_until_complete(main_headless(args))
     else:
         main_classic(args)
