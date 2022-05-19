@@ -8,9 +8,12 @@ import requests
 import argparse
 import os
 import signal
-import sys
 
-findAllLinksv2= '''"(?:\\"|')([\w]{2,10}:[\\\/]+[\w\d\*\_\-\.\:]+)?((([\\\/]+)([\.\w\d\_\-\:]+)((?![\.\w\d\_\-\:]+)[\\\/]+)?)+|(([\.\w\d\_\-\:]+)([\\\/]+)((?![\\\/]+)[\.\w\d\_\-\:]+)?)+)?(\?([\w\d\-\_\;{}()\[\]]+(\=([^&,\s]+(\&)?)?)?){0,})?(?:\\"|')"'''
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+findAllLinksv3 = '''"([\w]{2,10}:([\\\/]|[%]+(25)?2[fF])+[\w\d\*\_\-\.\:]+)?(((([\\\/]|[%]+(25)?2[fF])+)([\.\w\d\_\-\:]+)((?![\.\w\d\_\-\:]+)(([\\\/]|[%]+(25)?2[fF])+))?)+((([\.\w\d\_\-\:]+)(([\\\/]|[%]+(25)?2[fF])+)((?!([\\\/]|[%]+(25)?2[fF])+)[\.\w\d\_\-\:]+)?)+))?((\?|[%]+(25)?3[Ff])([\w\d\-\_\;{}\(\)\[\]]+((\=|[%]+(25)?3[dD])([^&,\s]+(\&)?)?)?){0,})?"'''
+findAllLinksv3_quotes = '''"(?:\\"|\')([\w]{2,10}:([\\\/]|[%]+(25)?2[fF])+[\w\d\*\_\-\.\:]+)?(((([\\\/]|[%]+(25)?2[fF])+)([\.\w\d\_\-\:]+)((?![\.\w\d\_\-\:]+)(([\\\/]|[%]+(25)?2[fF])+))?)+((([\.\w\d\_\-\:]+)(([\\\/]|[%]+(25)?2[fF])+)((?!([\\\/]|[%]+(25)?2[fF])+)[\.\w\d\_\-\:]+)?)+))?((\?|[%]+(25)?3[Ff])([\w\d\-\_\;{}\(\)\[\]]+((\=|[%]+(25)?3[dD])([^&,\s]+(\&)?)?)?){0,})?(?:\\"|\')"'''
 
 GARBAGE_EXTENSIONS = [
     "ico",
@@ -73,12 +76,12 @@ class Web_classic():
     
     def get_mime_types(self):
         # iana mimes
-        mimes_csv = requests.get("https://www.iana.org/assignments/media-types/application.csv").text
+        mimes_csv = requests.get("https://www.iana.org/assignments/media-types/application.csv", verify=False).text
         mimes = mimes_csv.split("\n")
         mimes = [m.split(",")[1].strip() for m in mimes if len(m.split(",")) > 1]
 
         # custom mimes
-        mimes2_csv = requests.get("https://gist.githubusercontent.com/electerious/3d5a31a73cfd6423f835c074ab25fc06/raw/d48b8410e9aa6746cfd946bca21a1bb54c351c4e/Caddyfile").text
+        mimes2_csv = requests.get("https://gist.githubusercontent.com/electerious/3d5a31a73cfd6423f835c074ab25fc06/raw/d48b8410e9aa6746cfd946bca21a1bb54c351c4e/Caddyfile", verify=False).text
         mimes2 = re.findall("[\w\d\+\-\_]+/[\w\d\+\-\_]+", mimes2_csv)
         mimes.extend(mimes2)
 
@@ -92,16 +95,27 @@ class Web_classic():
         self.browser = requests.Session()
     
     def page_goto(self, id, url):
+        if not url:
+            return False
         try:
-            self.page = requests.get(url, timeout=self.timeout, headers=self.headers)
+            self.page = requests.get(url, timeout=self.timeout, headers=self.headers, verify=False)
         except Exception as e:
             logger.error(f"Error: {e}")
+            if not url.startswith("https") and url.startswith("http"):
+                logger.info(f"Trying https for {url}")
+                return self.page_goto(id, f"https{url[4:]}")
+            else:
+                logger.critical("Url does not start with \"http\" :/")
             return False
         self.results["url"] = url
         return self.page
     
     def get_page_content(self, id):
-        body = self.page.text
+        try:
+            body = self.page.text
+        except AttributeError:
+            logger.error(f"Error :/ page is not defined ? requets failed ?")
+            body= ""
         self.results["body"] = body
         return body
 
@@ -120,12 +134,12 @@ class Web_headless():
     
     def get_mime_types(self):
         # iana mimes
-        mimes_csv = requests.get("https://www.iana.org/assignments/media-types/application.csv").text
+        mimes_csv = requests.get("https://www.iana.org/assignments/media-types/application.csv", verify=False).text
         mimes = mimes_csv.split("\n")
         mimes = [m.split(",")[1].strip() for m in mimes if len(m.split(",")) > 1]
 
         # custom mimes
-        mimes2_csv = requests.get("https://gist.githubusercontent.com/electerious/3d5a31a73cfd6423f835c074ab25fc06/raw/d48b8410e9aa6746cfd946bca21a1bb54c351c4e/Caddyfile").text
+        mimes2_csv = requests.get("https://gist.githubusercontent.com/electerious/3d5a31a73cfd6423f835c074ab25fc06/raw/d48b8410e9aa6746cfd946bca21a1bb54c351c4e/Caddyfile", verify=False).text
         mimes2 = re.findall("[\w\d\+\-\_]+/[\w\d\+\-\_]+", mimes2_csv)
         mimes.extend(mimes2)
 
@@ -172,9 +186,10 @@ class Web_headless():
         await self.pages[id].screenshot({'path': f"/tmp/{path}.png"})
 
 class Crawl():
-    def __init__(self, web, url):
+    def __init__(self, web, url, regex):
         self.init_url = url
         self.web = web
+        self.regex = regex
         self.fails = set()
         self.visited = set()
         self.queue = set()
@@ -184,9 +199,11 @@ class Crawl():
     def find_all_links_v2(self, id_):
         # uses pcregrep to find all links in the saved page, as python's "re" is very slow (because of the [^&,\s] at the end of the regex)
         # we set bit limits to prevent error while grepping links
-        return check_output(f"pcregrep --match-limit 1000000000 --buffer-size 10000000 --recursion-limit 1000000000 -ao {findAllLinksv2} /tmp/crawlalllinks/{id_}.txt | sed \"s/[\\\"|']//g\"  | sort -uV", shell=True, executable='/bin/bash').decode("utf-8")
+        return check_output(f"pcregrep --match-limit 1000000000 --buffer-size 10000000 --recursion-limit 1000000000 -ao {self.regex} /tmp/crawlalllinks/{id_}.txt | sed \"s/[\\\"|']//g\"  | sort -uV", shell=True, executable='/bin/bash').decode("utf-8")
     
     def visit_n_parse_classic(self, id_, url):
+        if url is None:
+            return set()
         p = self.web.page_goto(id_, url)
         if not p:
             self.add_failed({url})
@@ -257,7 +274,6 @@ class Crawl():
             f.write(self.return_results_formatted())
     
     def __str__(self):
-        cr = "\n"
         return f"""Fails: {len(self.fails)} - Visited: {len(self.visited)} - Queue: {len(self.queue)}"""
 
     def return_results_formatted(self):
@@ -301,14 +317,22 @@ class Link(object):
         return self.recreated_link
     
     def has_garbage_extension(self):
-
-        path = urlparse(self.recreated_link).path.lower()
-        if len(path.split(".")) < 1:
+        extension = self.get_link_extension()
+        if extension is None:
             return False
-        ext = path.split(".")[-1]
-        if ext in GARBAGE_EXTENSIONS:
+        if len(extension) < 1:
+            return False
+        if extension[-1] in GARBAGE_EXTENSIONS:
             return True
         return False
+    
+    def get_link_extension(self):
+        path = urlparse(self.recreated_link).path.lower().split(".")
+       
+        if len(path) < 1:
+            return None
+        return path[-1]
+    
 
 def load_headers(headers_string):
     headers = {}
@@ -320,7 +344,8 @@ def load_headers(headers_string):
 
 async def main_headless(args):
     veb = Web_headless(load_headers(args.header), timeout=args.timeout)
-    crawler = Crawl(web=veb, url=args.url)
+    regex = findAllLinksv3 if args.regex_quotes else findAllLinksv3
+    crawler = Crawl(web=veb, url=args.url, regex=regex)
 
     init_url_parsed = urlparse(args.url)
     await veb.start_browser()
@@ -328,9 +353,10 @@ async def main_headless(args):
     def signal_handler(sig, frame):
         logger.warning(f"Caught ctrl+c, saving results...")
         crawler.write_results()
-        print("================= links ===================")
-        print("\n".join(sorted(retrieved_links)))
-        print("================= results ===================")
+        if not args.quiet:
+            print("================= links ===================")
+            print("\n".join(sorted(retrieved_links)))
+            print("================= results ===================")
         print(crawler.return_results_formatted())
         
         exit(1)
@@ -362,14 +388,28 @@ async def main_headless(args):
                 crawler.visited.add(full_url)
                 continue
 
+            js_map = None
+            if args.find_more:
+                if link_.get_link_extension() == "js":
+                    logger.debug(f"Trying to find js.map file")
+                    parsed_link = urlparse(full_url)
+                    js_map = urlunparse(parsed_link._replace(path=f"{parsed_link.path}.map"))
+
             # print(f"{link} - {type_of_link} - {full_url}")
+
+            if args.restrict_exts is not None and link_.get_link_extension() not in args.restrict_exts:
+                logger.warning(f"Link has a restricted extension: {link_.get_link_extension()}, ignoring")
+                continue
 
             if args.mode == "sub" and ".".join(urlparse(full_url).netloc.split(".")[-2:]) == ".".join(init_url_parsed.netloc.split(".")[-2:]):
                 urls.add(full_url)
+                urls.add(js_map)
             if args.mode == "strict" and urlparse(full_url).netloc == init_url_parsed.netloc:
                 urls.add(full_url)
+                urls.add(js_map)
             if args.mode == "lax":
                 urls.add(full_url)
+                urls.add(js_map)
         return urls
     next_urls = get_next_urls(links)
     crawler.add_queue(next_urls)
@@ -380,28 +420,32 @@ async def main_headless(args):
 
         links = await crawler.visit_n_parse_headless(id_, url)
         crawler.add_queue(get_next_urls(links))
-        crawler.print_status()
+        if not args.quiet:
+            crawler.print_status()
     
     await veb.close_browser()
 
     crawler.write_results()
-    print("================= links ===================")
-    print("\n".join(sorted(retrieved_links)))
-    print("================= results ===================")
+    if not args.quiet:
+        print("================= links ===================")
+        print("\n".join(sorted(retrieved_links)))
+        print("================= results ===================")
     print(crawler.return_results_formatted())
 
 def main_classic(args):
     veb = Web_classic(forced_headers=load_headers(args.header), timeout=args.timeout)
-    crawler = Crawl(web=veb, url=args.url)
+    regex = findAllLinksv3_quotes if args.regex_quotes else findAllLinksv3
+    crawler = Crawl(web=veb, url=args.url, regex=regex)
 
     init_url_parsed = urlparse(args.url)
 
     def signal_handler(sig, frame):
         logger.warning(f"Caught ctrl+c, saving results...")
         crawler.write_results()
-        print("================= links ===================")
-        print("\n".join(sorted(retrieved_links)))
-        print("================= results ===================")
+        if not args.quiet:
+            print("================= links ===================")
+            print("\n".join(sorted(retrieved_links)))
+            print("================= results ===================")
         print(crawler.return_results_formatted())
         
         exit(1)
@@ -432,15 +476,28 @@ def main_classic(args):
                 # adding to visited to keep track of links that are not useful
                 crawler.visited.add(full_url)
                 continue
+            
+            js_map = None
+            if args.find_more:
+                if link_.get_link_extension() == "js":
+                    parsed_link = urlparse(full_url)
+                    js_map = urlunparse(parsed_link._replace(path=f"{parsed_link.path}.map"))
+            
+            if args.restrict_exts is not None and link_.get_link_extension() not in args.restrict_exts:
+                logger.warning(f"Link has a restricted extension: {link_.get_link_extension()}, ignoring")
+                continue
 
             # print(f"{link} - {type_of_link} - {full_url}")
 
             if args.mode == "sub" and ".".join(urlparse(full_url).netloc.split(".")[-2:]) == ".".join(init_url_parsed.netloc.split(".")[-2:]):
                 urls.add(full_url)
+                urls.add(js_map)
             if args.mode == "strict" and urlparse(full_url).netloc == init_url_parsed.netloc:
                 urls.add(full_url)
+                urls.add(js_map)
             if args.mode == "lax":
                 urls.add(full_url)
+                urls.add(js_map)
         return urls
 
     next_urls = get_next_urls(links)
@@ -452,33 +509,42 @@ def main_classic(args):
 
         links = crawler.visit_n_parse_classic(id_, url)
         crawler.add_queue(get_next_urls(links))
-        crawler.print_status()
+        if not args.quiet:
+            crawler.print_status()
     
     crawler.write_results()
-    print("================= links ===================")
-    print("\n".join(sorted(retrieved_links)))
-    print("================= results ===================")
+    if not args.quiet:
+        print("================= links ===================")
+        print("\n".join(sorted(retrieved_links)))
+        print("================= results ===================")
     print(crawler.return_results_formatted())
 
 
 def get_arguments():
     parser = argparse.ArgumentParser(description="Crawl all links from a webpage")
     parser.add_argument("url", type=str, help="URL to crawl")
-    parser.add_argument("--max-fails", type=int, help="max fails before stopping", default=10)
-    parser.add_argument("--max-visits", type=int, help="max visits before stopping", default=100)
+    parser.add_argument("-q", "--quiet", action="store_true", help="Shut the f up and output only the urls", default=False)
+    parser.add_argument("-mf", "--max-fails", type=int, help="max fails before stopping", default=10)
+    parser.add_argument("-mv", "--max-visits", type=int, help="max visits before stopping", default=100)
     parser.add_argument("-m", "--mode", type=str, help="Crawling mode", default="sub", choices=["sub", "lax", "strict"])
     parser.add_argument("-H", "--header", type=str, help="Headers to send", action='append', default=[])
     parser.add_argument("--timeout", type=int, help="Timeout for fetching web page", default=35)
-    parser.add_argument("--chrome-headless", help="Use a headless browser to run the crawler", action="store_true", default=False)
+    parser.add_argument("-ch", "--chrome-headless", help="Use a headless browser to run the crawler", action="store_true", default=False)
+    parser.add_argument("-fm", "--find-more", help="Try some techniques to get more interesting results", action="store_true", default=False)
+    parser.add_argument("-r", "--restrict-exts", action="append", help="Restrict extensions to these", default=None)
+    parser.add_argument("--regex-quotes", default=False, action="store_true", help="Use a specific regex that matches urls and paths only with \" or ' arround")
+
 
     return parser.parse_args()
 
 
 if __name__ == "__main__":
-    logger.info("Starting crawler")
     if not os.path.exists("/tmp/crawlalllinks"):
         os.mkdir("/tmp/crawlalllinks")
     args = get_arguments()
+    if args.quiet:
+        logger.remove(0)
+    logger.info("Starting crawler")
     if args.chrome_headless:
         asyncio.get_event_loop().run_until_complete(main_headless(args))
     else:
