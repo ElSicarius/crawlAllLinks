@@ -14,8 +14,8 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 findAllLinksv2= '''"(?:\\"|')([\w]{2,10}:[\\\/]+[\w\d\*\_\-\.\:]+)?((([\\\/]+)([\.\w\d\_\-\:]+)((?![\.\w\d\_\-\:]+)[\\\/]+)?)+|(([\.\w\d\_\-\:]+)([\\\/]+)((?![\\\/]+)[\.\w\d\_\-\:]+)?)+)?(\?([\w\d\-\_\;{}()\[\]]+(\=([^&,\s]+(\&)?)?)?){0,})?(?:\\"|')"'''
-findAllLinksv3 = '''"([\w]{2,10}:([\\\/]|[%]+(25)?2[fF])+[\w\d\*\_\-\.\:]+)?(([\.\w\d\_\-\:]+)?((([\\\/]|[%]+(25)?2[fF])+)(?![\w]+>)([\.\w\d\_\-\:]+())))?((([\.\w\d\_\-\:]+)?\?|[%]+(25)?3[Ff])([\w\d\-\_\;{}\(\)\[\]]+((\=|[%]+(25)?3[dD])([^&,\s]+(\&)?)?)?){0,})?"'''
-findAllLinksv3_quotes = '''"(?:\\"|\')([\w]{2,10}:([\\\/]|[%]+(25)?2[fF])+[\w\d\*\_\-\.\:]+)?(([\.\w\d\_\-\:]+)?((([\\\/]|[%]+(25)?2[fF])+)(?![\w]+>)([\.\w\d\_\-\:]+())))?((([\.\w\d\_\-\:]+)?\?|[%]+(25)?3[Ff])([\w\d\-\_\;{}\(\)\[\]]+((\=|[%]+(25)?3[dD])([^&,\s]+(\&)?)?)?){0,})?(?:\\"|\')"'''
+findAllLinksv3 = '''"([\w]{2,10}:([\\\/]|[%]+(25)?2[fF])+[\w\d\*\_\-\.\:]+)?(([\.\w\d\_\-\:]+)?((([\\\/]|[%]+(25)?2[fF])+)(?![\w]+>)([\.\w\d\_\-\:]+())))?((([\.\w\d\_\-\:]+)?\?|[%]+(25)?3[Ff])([\w\d\-\_\;{}\(\)\[\]]+((\=|[%]+(25)?3[dD])([^&,\s]+(\&)?)?)?){1,})?"'''
+findAllLinksv3_quotes = '''"(?:\\"|\')([\w]{2,10}:([\\\/]|[%]+(25)?2[fF])+[\w\d\*\_\-\.\:]+)?(([\.\w\d\_\-\:]+)?((([\\\/]|[%]+(25)?2[fF])+)(?![\w]+>)([\.\w\d\_\-\:]+())))?((([\.\w\d\_\-\:]+)?\?|[%]+(25)?3[Ff])([\w\d\-\_\;{}\(\)\[\]]+((\=|[%]+(25)?3[dD])([^&,\s]+(\&)?)?)?){1,})?(?:\\"|\')"'''
 
 GARBAGE_EXTENSIONS = [
     "ico",
@@ -190,15 +190,15 @@ class Web_headless():
         await self.pages[id].screenshot({'path': f"/tmp/{path}.png"})
 
 class Crawl():
-    def __init__(self, web, url, regex, restricted_exts=None):
+    def __init__(self, web, url, filter_output_duplicates=True, restricted_exts=None):
         self.init_url = url
         self.web = web
-        self.regex = regex
         self.fails = set()
         self.visited = set()
         self.queue = set()
         self.results_pages = dict()
         self.restricted_exts = restricted_exts
+        self.filter_output_duplicates = filter_output_duplicates
         self.queue.add(url)
     
     def find_all_links_v3(self, id_):
@@ -229,7 +229,7 @@ class Crawl():
     async def visit_n_parse_headless(self, id_, url):
         p = await self.web.page_goto(id_, url)
         try:
-            self.add_visited({url}, status=p.status_code, headers=p.headers)
+            self.add_visited({url}, status=p.status, headers=p.headers)
         except:
             self.add_failed({url})
 
@@ -247,12 +247,12 @@ class Crawl():
         for link in links:
             if link not in self.visited and link not in self.fails :
                 self.queue.add(link)
-                self.results_pages.setdefault(link, dict({
+                self.results_pages.setdefault(link, {
                 "status": 0,
                 "url": link,
                 "headers": {},
                 "len": 0,
-            }))
+            })
     
     def add_visited(self, links: set, status: int=0, headers: dict={}, len_: int=0):
         for link in links:
@@ -287,6 +287,16 @@ class Crawl():
     def return_results_formatted(self):
         content = str()
         res_sorted = {k: self.results_pages[k] for k in sorted(self.results_pages, key=lambda element: (self.results_pages[element]["status"], self.results_pages[element]["len"]))}
+        if self.filter_output_duplicates:
+            new_res_sorted = dict()
+            dup_filter = set()
+            for url, page in res_sorted.items():
+                if not f'{page["status"]}{page["len"]}' in dup_filter:
+                    new_res_sorted[url] = page
+                    
+                    dup_filter.add(f'{page["status"]}{page["len"]}')
+            res_sorted = new_res_sorted
+
         for response in res_sorted.values():
             link_ = Link(response["url"], response["url"])
             link_.state = "url_absolute"
@@ -399,8 +409,7 @@ def try_find_more_urls(link_):
 
 async def main_headless(args):
     veb = Web_headless(load_headers(args.header), timeout=args.timeout)
-    regex = findAllLinksv3 if args.regex_quotes else findAllLinksv3
-    crawler = Crawl(web=veb, url=args.url, regex=regex, restricted_exts=args.restrict_exts)
+    crawler = Crawl(web=veb, url=args.url, filter_output_duplicates=args.remove_siblings, restricted_exts=args.restrict_exts)
 
     init_url_parsed = urlparse(args.url)
     await veb.start_browser()
@@ -482,8 +491,7 @@ async def main_headless(args):
 
 def main_classic(args):
     veb = Web_classic(forced_headers=load_headers(args.header), timeout=args.timeout)
-    regex = findAllLinksv3 if args.regex_quotes else findAllLinksv3
-    crawler = Crawl(web=veb, url=args.url, regex=regex, restricted_exts=args.restrict_exts)
+    crawler = Crawl(web=veb, url=args.url, filter_output_duplicates=args.remove_siblings, restricted_exts=args.restrict_exts)
 
     init_url_parsed = urlparse(args.url)
 
@@ -575,7 +583,7 @@ def get_arguments():
     parser.add_argument("-ch", "--chrome-headless", help="Use a headless browser to run the crawler", action="store_true", default=False)
     parser.add_argument("-fm", "--find-more", help="Try some techniques to get more interesting results", action="store_true", default=False)
     parser.add_argument("-r", "--restrict-exts", action="append", help="Restrict extensions to these", default=None)
-    parser.add_argument("--regex-quotes", default=False, action="store_true", help="Use a specific regex that matches urls and paths only with \" or ' arround")
+    parser.add_argument("-rs", "--remove_siblings", action="store_true", help="Clean te output bu filtering statuscode and len to keep only 1 reprensative of each status-len", default=False)
 
 
     return parser.parse_args()
