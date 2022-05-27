@@ -1,4 +1,5 @@
 import asyncio
+from distutils import extension
 from pyppeteer import launch
 from subprocess import check_output
 from loguru import logger
@@ -186,7 +187,7 @@ class Web_headless():
         await self.pages[id].screenshot({'path': f"/tmp/{path}.png"})
 
 class Crawl():
-    def __init__(self, web, url, regex):
+    def __init__(self, web, url, regex, restricted_exts=None):
         self.init_url = url
         self.web = web
         self.regex = regex
@@ -194,9 +195,10 @@ class Crawl():
         self.visited = set()
         self.queue = set()
         self.results_pages = dict()
+        self.restricted_exts = restricted_exts
         self.queue.add(url)
     
-    def find_all_links_v2(self, id_):
+    def find_all_links_v3(self, id_):
         # uses pcregrep to find all links in the saved page, as python's "re" is very slow (because of the [^&,\s] at the end of the regex)
         # we set bit limits to prevent error while grepping links
         return check_output(f"pcregrep --match-limit 1000000000 --buffer-size 10000000 --recursion-limit 1000000000 -ao {self.regex} /tmp/crawlalllinks/{id_}.txt | sed \"s/[\\\"|']//g\"  | sort -uV", shell=True, executable='/bin/bash').decode("utf-8")
@@ -205,7 +207,7 @@ class Crawl():
         if url is None:
             return set()
         p = self.web.page_goto(id_, url)
-        if not p:
+        if p is None:
             self.add_failed({url})
         else:
             self.add_visited({url}, status=p.status_code, headers=p.headers)
@@ -214,14 +216,14 @@ class Crawl():
         self.results_pages[url]["len"] = len(content)
         with open(f"/tmp/crawlalllinks/{id_}.txt", "w") as f:
             f.write(content)
-        links = self.find_all_links_v2(id_)
+        links = self.find_all_links_v3(id_)
         for link in links.splitlines():
             retrieved_links.add(link)
         return set(links.splitlines())
     
     async def visit_n_parse_headless(self, id_, url):
         p = await self.web.page_goto(id_, url)
-        if not p:
+        if p is None:
             self.add_failed({url})
         else:
             self.add_visited({url}, status=p.status, headers=p.headers)
@@ -230,7 +232,7 @@ class Crawl():
         self.results_pages[url]["len"] = len(content)
         with open(f"/tmp/crawlalllinks/{id_}.txt", "w") as f:
             f.write(content)
-        links = self.find_all_links_v2(id_)
+        links = self.find_all_links_v3(id_)
         for link in links.splitlines():
             retrieved_links.add(link)
         return set(links.splitlines())
@@ -279,7 +281,12 @@ class Crawl():
     def return_results_formatted(self):
         content = str()
         res_sorted = {k: self.results_pages[k] for k in sorted(self.results_pages, key=lambda element: (self.results_pages[element]["status"], self.results_pages[element]["len"]))}
-        for url, response in res_sorted.items():
+        for response in res_sorted.values():
+            link_ = Link(response["url"], response["url"])
+            link_.state = "url_absolute"
+            link_.format_link()
+            if self.restricted_exts is not None and link_.get_link_extension() not in self.restricted_exts:
+                continue
             content += f"""{response["status"]} | {response["len"]} | {response["url"]}\n"""
         return content
     
@@ -327,11 +334,16 @@ class Link(object):
         return False
     
     def get_link_extension(self):
-        path = urlparse(self.recreated_link).path.lower().split(".")
-       
-        if len(path) < 1:
+        path = urlparse(self.recreated_link).path.lower()
+        last_section = os.path.split(path)[-1]
+        _, *ext = last_section.split(".")
+
+        if len(ext) == 0:
             return None
-        return path[-1]
+        return ext[-1]
+    
+    def __str__(self) -> str:
+        return self.recreated_link
     
 
 def load_headers(headers_string):
@@ -342,10 +354,20 @@ def load_headers(headers_string):
         headers[header_name] = value
     return headers
 
+def try_find_more_urls(link_):
+    more_urls = set()
+    if link_.get_link_extension() == "js":
+        logger.debug(f"Trying to find js.map file")
+        parsed_link = urlparse(str(link_))
+        js_map = urlunparse(parsed_link._replace(path=f"{parsed_link.path}.map"))
+        more_urls.add(js_map)
+    
+    return more_urls
+
 async def main_headless(args):
     veb = Web_headless(load_headers(args.header), timeout=args.timeout)
     regex = findAllLinksv3 if args.regex_quotes else findAllLinksv3
-    crawler = Crawl(web=veb, url=args.url, regex=regex)
+    crawler = Crawl(web=veb, url=args.url, regex=regex, restricted_exts=args.restrict_exts)
 
     init_url_parsed = urlparse(args.url)
     await veb.start_browser()
@@ -388,28 +410,21 @@ async def main_headless(args):
                 crawler.visited.add(full_url)
                 continue
 
-            js_map = None
+            more_urls = set()
             if args.find_more:
-                if link_.get_link_extension() == "js":
-                    logger.debug(f"Trying to find js.map file")
-                    parsed_link = urlparse(full_url)
-                    js_map = urlunparse(parsed_link._replace(path=f"{parsed_link.path}.map"))
+                more_urls = try_find_more_urls(link_)
 
             # print(f"{link} - {type_of_link} - {full_url}")
 
-            if args.restrict_exts is not None and link_.get_link_extension() not in args.restrict_exts:
-                logger.warning(f"Link has a restricted extension: {link_.get_link_extension()}, ignoring")
-                continue
-
             if args.mode == "sub" and ".".join(urlparse(full_url).netloc.split(".")[-2:]) == ".".join(init_url_parsed.netloc.split(".")[-2:]):
                 urls.add(full_url)
-                urls.add(js_map)
+                urls |= more_urls
             if args.mode == "strict" and urlparse(full_url).netloc == init_url_parsed.netloc:
                 urls.add(full_url)
-                urls.add(js_map)
+                urls |= more_urls
             if args.mode == "lax":
                 urls.add(full_url)
-                urls.add(js_map)
+                urls |= more_urls
         return urls
     next_urls = get_next_urls(links)
     crawler.add_queue(next_urls)
@@ -435,7 +450,7 @@ async def main_headless(args):
 def main_classic(args):
     veb = Web_classic(forced_headers=load_headers(args.header), timeout=args.timeout)
     regex = findAllLinksv3_quotes if args.regex_quotes else findAllLinksv3
-    crawler = Crawl(web=veb, url=args.url, regex=regex)
+    crawler = Crawl(web=veb, url=args.url, regex=regex, restricted_exts=args.restrict_exts)
 
     init_url_parsed = urlparse(args.url)
 
@@ -477,27 +492,22 @@ def main_classic(args):
                 crawler.visited.add(full_url)
                 continue
             
-            js_map = None
+            more_urls = set()
             if args.find_more:
-                if link_.get_link_extension() == "js":
-                    parsed_link = urlparse(full_url)
-                    js_map = urlunparse(parsed_link._replace(path=f"{parsed_link.path}.map"))
-            
-            if args.restrict_exts is not None and link_.get_link_extension() not in args.restrict_exts:
-                logger.warning(f"Link has a restricted extension: {link_.get_link_extension()}, ignoring")
-                continue
+                more_urls = try_find_more_urls(link_)
 
             # print(f"{link} - {type_of_link} - {full_url}")
+            
 
             if args.mode == "sub" and ".".join(urlparse(full_url).netloc.split(".")[-2:]) == ".".join(init_url_parsed.netloc.split(".")[-2:]):
                 urls.add(full_url)
-                urls.add(js_map)
+                urls |= more_urls
             if args.mode == "strict" and urlparse(full_url).netloc == init_url_parsed.netloc:
                 urls.add(full_url)
-                urls.add(js_map)
+                urls |= more_urls
             if args.mode == "lax":
                 urls.add(full_url)
-                urls.add(js_map)
+                urls |= more_urls
         return urls
 
     next_urls = get_next_urls(links)
