@@ -14,8 +14,8 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 findAllLinksv2= '''"(?:\\"|')([\w]{2,10}:[\\\/]+[\w\d\*\_\-\.\:]+)?((([\\\/]+)([\.\w\d\_\-\:]+)((?![\.\w\d\_\-\:]+)[\\\/]+)?)+|(([\.\w\d\_\-\:]+)([\\\/]+)((?![\\\/]+)[\.\w\d\_\-\:]+)?)+)?(\?([\w\d\-\_\;{}()\[\]]+(\=([^&,\s]+(\&)?)?)?){0,})?(?:\\"|')"'''
-findAllLinksv3 = '''"([\w]{2,10}:([\\\/]|[%]+(25)?2[fF])+[\w\d\*\_\-\.\:]+)?(((([\\\/]|[%]+(25)?2[fF])+)([\.\w\d\_\-\:]+)((?![\.\w\d\_\-\:]+)(([\\\/]|[%]+(25)?2[fF])+))?)+((([\.\w\d\_\-\:]+)(([\\\/]|[%]+(25)?2[fF])+)((?!([\\\/]|[%]+(25)?2[fF])+)[\.\w\d\_\-\:]+)?)+))?((\?|[%]+(25)?3[Ff])([\w\d\-\_\;{}\(\)\[\]]+((\=|[%]+(25)?3[dD])([^&,\s]+(\&)?)?)?){0,})?"'''
-findAllLinksv3_quotes = '''"(?:\\"|\')([\w]{2,10}:([\\\/]|[%]+(25)?2[fF])+[\w\d\*\_\-\.\:]+)?(((([\\\/]|[%]+(25)?2[fF])+)([\.\w\d\_\-\:]+)((?![\.\w\d\_\-\:]+)(([\\\/]|[%]+(25)?2[fF])+))?)+((([\.\w\d\_\-\:]+)(([\\\/]|[%]+(25)?2[fF])+)((?!([\\\/]|[%]+(25)?2[fF])+)[\.\w\d\_\-\:]+)?)+))?((\?|[%]+(25)?3[Ff])([\w\d\-\_\;{}\(\)\[\]]+((\=|[%]+(25)?3[dD])([^&,\s]+(\&)?)?)?){0,})?(?:\\"|\')"'''
+findAllLinksv3 = '''"([\w]{2,10}:([\\\/]|[%]+(25)?2[fF])+[\w\d\*\_\-\.\:]+)?(([\.\w\d\_\-\:]+)?((([\\\/]|[%]+(25)?2[fF])+)(?![\w]+>)([\.\w\d\_\-\:]+())))?((([\.\w\d\_\-\:]+)?\?|[%]+(25)?3[Ff])([\w\d\-\_\;{}\(\)\[\]]+((\=|[%]+(25)?3[dD])([^&,\s]+(\&)?)?)?){0,})?"'''
+findAllLinksv3_quotes = '''"(?:\\"|\')([\w]{2,10}:([\\\/]|[%]+(25)?2[fF])+[\w\d\*\_\-\.\:]+)?(([\.\w\d\_\-\:]+)?((([\\\/]|[%]+(25)?2[fF])+)(?![\w]+>)([\.\w\d\_\-\:]+())))?((([\.\w\d\_\-\:]+)?\?|[%]+(25)?3[Ff])([\w\d\-\_\;{}\(\)\[\]]+((\=|[%]+(25)?3[dD])([^&,\s]+(\&)?)?)?){0,})?(?:\\"|\')"'''
 
 GARBAGE_EXTENSIONS = [
     "ico",
@@ -106,8 +106,10 @@ class Web_classic():
             if not url.startswith("https") and url.startswith("http"):
                 logger.info(f"Trying https for {url}")
                 return self.page_goto(id, f"https{url[4:]}")
+            elif url.startswith("https"):
+                pass
             else:
-                logger.critical("Url does not start with \"http\" :/")
+                logger.critical(f"Url {url} does not start with \"http\" :/")
             return False
         self.results["url"] = url
         return self.page
@@ -202,16 +204,18 @@ class Crawl():
     def find_all_links_v3(self, id_):
         # uses pcregrep to find all links in the saved page, as python's "re" is very slow (because of the [^&,\s] at the end of the regex)
         # we set bit limits to prevent error while grepping links
-        return check_output(f"pcregrep --match-limit 1000000000 --buffer-size 10000000 --recursion-limit 1000000000 -ao {self.regex} /tmp/crawlalllinks/{id_}.txt | sed \"s/[\\\"|']//g\"  | sort -uV", shell=True, executable='/bin/bash').decode("utf-8")
+        findv3 = check_output(f"pcregrep --match-limit 1000000000 --buffer-size 10000000 --recursion-limit 1000000000 -ao {findAllLinksv3} /tmp/crawlalllinks/{id_}.txt | sed \"s/[\\\"|']//g\"  | sort -uV", shell=True, executable='/bin/bash').decode("utf-8")
+        findv3_quotes = check_output(f"pcregrep --match-limit 1000000000 --buffer-size 10000000 --recursion-limit 1000000000 -ao {findAllLinksv3_quotes} /tmp/crawlalllinks/{id_}.txt | sed \"s/[\\\"|']//g\"  | sort -uV", shell=True, executable='/bin/bash').decode("utf-8")
+        return f"{findv3}\n{findv3_quotes}"
     
     def visit_n_parse_classic(self, id_, url):
         if url is None:
             return set()
         p = self.web.page_goto(id_, url)
-        if p is None:
-            self.add_failed({url})
-        else:
+        try:
             self.add_visited({url}, status=p.status_code, headers=p.headers)
+        except:
+            self.add_failed({url})
         self.queue.discard(url)
         content = self.web.get_page_content(id_)
         self.results_pages[url]["len"] = len(content)
@@ -224,10 +228,11 @@ class Crawl():
     
     async def visit_n_parse_headless(self, id_, url):
         p = await self.web.page_goto(id_, url)
-        if not p:
+        try:
+            self.add_visited({url}, status=p.status_code, headers=p.headers)
+        except:
             self.add_failed({url})
-        else:
-            self.add_visited({url}, status=p.status, headers=p.headers)
+
         self.queue.discard(url)
         content = await self.web.get_page_content(id_)
         self.results_pages[url]["len"] = len(content)
@@ -363,35 +368,38 @@ def try_find_more_urls(link_):
         parsed_link = urlparse(str(link_))
         js_map = urlunparse(parsed_link._replace(path=f"{parsed_link.path}.map"))
         more_urls.add(js_map)
-    # elif extension_ in ["php", "asp", "aspx"]:
-    #     logger.debug(f"trying to find backup files") 
-    #     parsed_link = urlparse(str(link_))
-    #     path_no_extension = os.path.join(os.path.split(parsed_link.path)[:-1],os.path.split(parsed_link.path)[-1].split(".")[0])
+    elif extension_ in ["php", "asp", "aspx"]:
+        logger.debug(f"trying to find backup files") 
+        parsed_link = urlparse(str(link_))
+        path_no_extension = os.path.join(
+                                "/".join(os.path.split(parsed_link.path)[:-1]),
+                                os.path.split(parsed_link.path)[-1].split(".")[0]
+                            )
         
-    #     for new_file in [
-    #             f"{path_no_extension}.bak", 
-    #             f"{path_no_extension}.old", 
-    #             f"{path_no_extension}.old.bak", 
-    #             f"{path_no_extension}.zip",
-    #             f"{path_no_extension}.{extension_}~", 
-    #             f"{path_no_extension}.{extension_}.bak",
-    #             f"{path_no_extension}.{extension_}.old",
-    #             f"{path_no_extension}.{extension_}.old.bak",
-    #             f"{path_no_extension}.{extension_}.zip", 
-    #             f"{path_no_extension}.{extension_}.tar.gz",
-    #             f"{path_no_extension}.{extension_}.tar.bz2",
-    #             f"{path_no_extension}.{extension_}.1",
-    #             f"{path_no_extension}.{extension_} (1)",
-    #             f"{path_no_extension}.{extension_}.save.swp"
+        for new_file in [
+                f"{path_no_extension}.bak", 
+                f"{path_no_extension}.old", 
+                f"{path_no_extension}.old.bak", 
+                f"{path_no_extension}.zip",
+                f"{path_no_extension}.{extension_}~", 
+                f"{path_no_extension}.{extension_}.bak",
+                f"{path_no_extension}.{extension_}.old",
+                f"{path_no_extension}.{extension_}.old.bak",
+                f"{path_no_extension}.{extension_}.zip", 
+                f"{path_no_extension}.{extension_}.tar.gz",
+                f"{path_no_extension}.{extension_}.tar.bz2",
+                f"{path_no_extension}.{extension_}.1",
+                f"{path_no_extension}.{extension_} (1)",
+                f"{path_no_extension}.{extension_}.save.swp"
 
-    #             ]:
-    #         more_urls.add(urlunparse(parsed_link._replace(path=new_file)))
+                ]:
+            more_urls.add(urlunparse(parsed_link._replace(path=new_file)))
         
     return more_urls
 
 async def main_headless(args):
     veb = Web_headless(load_headers(args.header), timeout=args.timeout)
-    regex = findAllLinksv2 if args.regex_quotes else findAllLinksv2
+    regex = findAllLinksv3 if args.regex_quotes else findAllLinksv3
     crawler = Crawl(web=veb, url=args.url, regex=regex, restricted_exts=args.restrict_exts)
 
     init_url_parsed = urlparse(args.url)
@@ -474,7 +482,7 @@ async def main_headless(args):
 
 def main_classic(args):
     veb = Web_classic(forced_headers=load_headers(args.header), timeout=args.timeout)
-    regex = findAllLinksv2 if args.regex_quotes else findAllLinksv2
+    regex = findAllLinksv3 if args.regex_quotes else findAllLinksv3
     crawler = Crawl(web=veb, url=args.url, regex=regex, restricted_exts=args.restrict_exts)
 
     init_url_parsed = urlparse(args.url)
