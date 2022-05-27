@@ -13,6 +13,7 @@ import signal
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+findAllLinksv2= '''"(?:\\"|')([\w]{2,10}:[\\\/]+[\w\d\*\_\-\.\:]+)?((([\\\/]+)([\.\w\d\_\-\:]+)((?![\.\w\d\_\-\:]+)[\\\/]+)?)+|(([\.\w\d\_\-\:]+)([\\\/]+)((?![\\\/]+)[\.\w\d\_\-\:]+)?)+)?(\?([\w\d\-\_\;{}()\[\]]+(\=([^&,\s]+(\&)?)?)?){0,})?(?:\\"|')"'''
 findAllLinksv3 = '''"([\w]{2,10}:([\\\/]|[%]+(25)?2[fF])+[\w\d\*\_\-\.\:]+)?(((([\\\/]|[%]+(25)?2[fF])+)([\.\w\d\_\-\:]+)((?![\.\w\d\_\-\:]+)(([\\\/]|[%]+(25)?2[fF])+))?)+((([\.\w\d\_\-\:]+)(([\\\/]|[%]+(25)?2[fF])+)((?!([\\\/]|[%]+(25)?2[fF])+)[\.\w\d\_\-\:]+)?)+))?((\?|[%]+(25)?3[Ff])([\w\d\-\_\;{}\(\)\[\]]+((\=|[%]+(25)?3[dD])([^&,\s]+(\&)?)?)?){0,})?"'''
 findAllLinksv3_quotes = '''"(?:\\"|\')([\w]{2,10}:([\\\/]|[%]+(25)?2[fF])+[\w\d\*\_\-\.\:]+)?(((([\\\/]|[%]+(25)?2[fF])+)([\.\w\d\_\-\:]+)((?![\.\w\d\_\-\:]+)(([\\\/]|[%]+(25)?2[fF])+))?)+((([\.\w\d\_\-\:]+)(([\\\/]|[%]+(25)?2[fF])+)((?!([\\\/]|[%]+(25)?2[fF])+)[\.\w\d\_\-\:]+)?)+))?((\?|[%]+(25)?3[Ff])([\w\d\-\_\;{}\(\)\[\]]+((\=|[%]+(25)?3[dD])([^&,\s]+(\&)?)?)?){0,})?(?:\\"|\')"'''
 
@@ -223,7 +224,7 @@ class Crawl():
     
     async def visit_n_parse_headless(self, id_, url):
         p = await self.web.page_goto(id_, url)
-        if p is None:
+        if not p:
             self.add_failed({url})
         else:
             self.add_visited({url}, status=p.status, headers=p.headers)
@@ -356,17 +357,41 @@ def load_headers(headers_string):
 
 def try_find_more_urls(link_):
     more_urls = set()
-    if link_.get_link_extension() == "js":
+    extension_ = link_.get_link_extension()
+    if extension_ == "js":
         logger.debug(f"Trying to find js.map file")
         parsed_link = urlparse(str(link_))
         js_map = urlunparse(parsed_link._replace(path=f"{parsed_link.path}.map"))
         more_urls.add(js_map)
-    
+    # elif extension_ in ["php", "asp", "aspx"]:
+    #     logger.debug(f"trying to find backup files") 
+    #     parsed_link = urlparse(str(link_))
+    #     path_no_extension = os.path.join(os.path.split(parsed_link.path)[:-1],os.path.split(parsed_link.path)[-1].split(".")[0])
+        
+    #     for new_file in [
+    #             f"{path_no_extension}.bak", 
+    #             f"{path_no_extension}.old", 
+    #             f"{path_no_extension}.old.bak", 
+    #             f"{path_no_extension}.zip",
+    #             f"{path_no_extension}.{extension_}~", 
+    #             f"{path_no_extension}.{extension_}.bak",
+    #             f"{path_no_extension}.{extension_}.old",
+    #             f"{path_no_extension}.{extension_}.old.bak",
+    #             f"{path_no_extension}.{extension_}.zip", 
+    #             f"{path_no_extension}.{extension_}.tar.gz",
+    #             f"{path_no_extension}.{extension_}.tar.bz2",
+    #             f"{path_no_extension}.{extension_}.1",
+    #             f"{path_no_extension}.{extension_} (1)",
+    #             f"{path_no_extension}.{extension_}.save.swp"
+
+    #             ]:
+    #         more_urls.add(urlunparse(parsed_link._replace(path=new_file)))
+        
     return more_urls
 
 async def main_headless(args):
     veb = Web_headless(load_headers(args.header), timeout=args.timeout)
-    regex = findAllLinksv3 if args.regex_quotes else findAllLinksv3
+    regex = findAllLinksv2 if args.regex_quotes else findAllLinksv2
     crawler = Crawl(web=veb, url=args.url, regex=regex, restricted_exts=args.restrict_exts)
 
     init_url_parsed = urlparse(args.url)
@@ -449,7 +474,7 @@ async def main_headless(args):
 
 def main_classic(args):
     veb = Web_classic(forced_headers=load_headers(args.header), timeout=args.timeout)
-    regex = findAllLinksv3_quotes if args.regex_quotes else findAllLinksv3
+    regex = findAllLinksv2 if args.regex_quotes else findAllLinksv2
     crawler = Crawl(web=veb, url=args.url, regex=regex, restricted_exts=args.restrict_exts)
 
     init_url_parsed = urlparse(args.url)
