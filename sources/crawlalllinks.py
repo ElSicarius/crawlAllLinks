@@ -14,9 +14,11 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 FALv2= '''(?:\\"|')([\w]{2,10}:[\\\/]+[\w\d\*\_\-\.\:]+)?((([\\\/]+)([\.\w\d\_\-\:]+)((?![\.\w\d\_\-\:]+)[\\\/]+)?)+|(([\.\w\d\_\-\:]+)([\\\/]+)((?![\\\/]+)[\.\w\d\_\-\:]+)?)+)?(\?([\w\d\-\_\;{}()\[\]]+(\=([^&,\s]+(\&)?)?)?){0,})?(?:\\"|')'''
-FALv3 = '''([\w]{2,10}:([\\\/]|[%]+(25)?2[fF])+[\w\d\*\_\-\.\:]+)?(([\.\w\d\_\-\:]+)?((([\\\/]|[%]+(25)?2[fF])+)(?!([\w\S]+([\\\/]+)?>))([\.\w\d\_\-\:]+)))?((([\.\w\d\_\-\:]+)?(\?|[%]+(25)?3[Ff]))([\w\d\-\_\;{}\(\)\[\]]+((\=|[%]+(25)?3[dD])([^&,\s]+(\&)?)?)?){1,})?'''
+FALv3 = '''([\w]{2,10}:([\\\/]|[%]+(25)?2[fF])+[\w\d\*\_\-\.\:]+)?(([\.\w\d\_\-\:]+)?((([\\\/]|[%]+(25)?2[fF])+)(?!((<([\w\s]+[\\\/]+)|([\\\/]+[\w\s]))>))([\.\w\+\d\_\-\:]+)))?((([\.\w\+\d\_\-\:]+)?(\?|[%]+(25)?3[Ff]))([\w\d\-\_\;{}\(\)\[\]]+((\=|[%]+(25)?3[dD])([^&,\s]+(\&)?)?)?){1,})?'''
 findAllLinksv3 = f'"{FALv3}"'
 findAllLinksv3_quotes = f'''"(?:\\"|\'){FALv3}(?:\\"|\')"'''
+findAllLinksv3_no_quotes = f'''"(?!\\"|\'){FALv3}(?!\\"|\')"'''
+
 
 GARBAGE_EXTENSIONS = [
     "ico",
@@ -215,8 +217,10 @@ class Crawl():
         p = self.web.page_goto(id_, url)
         try:
             self.add_visited({url}, status=p.status_code, headers=p.headers)
+            logger.success(f"STATUS: {p.status_code} | LENGTH: {len(p.text)} | LINK: {url}")
         except:
             self.add_failed({url})
+            logger.warning(f"STATUS: FAIL | LINK: {url}")
         self.queue.discard(url)
         content = self.web.get_page_content(id_)
         self.results_pages[url]["len"] = len(content)
@@ -231,11 +235,14 @@ class Crawl():
         p = await self.web.page_goto(id_, url)
         try:
             self.add_visited({url}, status=p.status, headers=p.headers)
+            
         except:
             self.add_failed({url})
+            logger.warning(f"STATUS: FAIL | LINK: {url}")
 
         self.queue.discard(url)
         content = await self.web.get_page_content(id_)
+        logger.success(f"STATUS: {p.status} | LENGTH: {len(content)} | LINK: {url}")
         self.results_pages[url]["len"] = len(content)
         with open(f"/tmp/crawlalllinks/{id_}.txt", "w") as f:
             f.write(content)
@@ -371,16 +378,14 @@ def load_headers(headers_string):
         headers[header_name] = value
     return headers
 
-def try_find_more_urls(link_):
+def try_find_more_urls(link_, modes=[]):
     more_urls = set()
     extension_ = link_.get_link_extension()
-    if extension_ == "js":
-        logger.debug(f"Trying to find js.map file")
+    if extension_ == "js" and "map" in modes:
         parsed_link = urlparse(str(link_))
         js_map = urlunparse(parsed_link._replace(path=f"{parsed_link.path}.map"))
         more_urls.add(js_map)
-    elif extension_ in ["php", "asp", "aspx"]:
-        logger.debug(f"trying to find backup files") 
+    elif extension_ in ["php", "asp", "aspx"] and "bak" in modes:
         parsed_link = urlparse(str(link_))
         path_no_extension = os.path.join(
                                 "/".join(os.path.split(parsed_link.path)[:-1]),
@@ -454,8 +459,8 @@ async def main_headless(args):
                 continue
 
             more_urls = set()
-            if args.find_more:
-                more_urls = try_find_more_urls(link_)
+            if args.find_mode and len(args.find_more) > 0:
+                more_urls = try_find_more_urls(link_, args.find_more)
 
             # print(f"{link} - {type_of_link} - {full_url}")
 
@@ -535,8 +540,8 @@ def main_classic(args):
                 continue
             
             more_urls = set()
-            if args.find_more:
-                more_urls = try_find_more_urls(link_)
+            if args.find_more and len(args.find_more) > 0:
+                more_urls = try_find_more_urls(link_, args.find_more)
 
             # print(f"{link} - {type_of_link} - {full_url}")
             
@@ -582,7 +587,7 @@ def get_arguments():
     parser.add_argument("-H", "--header", type=str, help="Headers to send", action='append', default=[])
     parser.add_argument("--timeout", type=int, help="Timeout for fetching web page", default=35)
     parser.add_argument("-ch", "--chrome-headless", help="Use a headless browser to run the crawler", action="store_true", default=False)
-    parser.add_argument("-fm", "--find-more", help="Try some techniques to get more interesting results", action="store_true", default=False)
+    parser.add_argument("-fm", "--find-more", help="Try some techniques to get more interesting results", action="append", choices=["map", "bak"])
     parser.add_argument("-r", "--restrict-exts", action="append", help="Restrict extensions to these", default=None)
     parser.add_argument("-rs", "--remove_siblings", action="store_true", help="Clean te output bu filtering statuscode and len to keep only 1 reprensative of each status-len", default=False)
 
