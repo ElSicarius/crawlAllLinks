@@ -1,9 +1,9 @@
 import asyncio
-from distutils import extension
 from pyppeteer import launch
 from subprocess import check_output
 from loguru import logger
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse, unquote
+from html import unescape
 import re
 import requests
 import argparse
@@ -14,7 +14,7 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 FALv2= '''(?:\\"|')([\w]{2,10}:[\\\/]+[\w\d\*\_\-\.\:]+)?((([\\\/]+)([\.\w\d\_\-\:]+)((?![\.\w\d\_\-\:]+)[\\\/]+)?)+|(([\.\w\d\_\-\:]+)([\\\/]+)((?![\\\/]+)[\.\w\d\_\-\:]+)?)+)?(\?([\w\d\-\_\;{}()\[\]]+(\=([^&,\s]+(\&)?)?)?){0,})?(?:\\"|')'''
-FALv3 = '''([\w]{2,10}:([\\\/]|[%]+(25)?2[fF])+[\w\d\*\_\-\.\:]+)?(([\.\w\d\_\-\:]+)?((([\\\/]|[%]+(25)?2[fF])+)(?!((<([\w\s]+[\\\/]+)|([\\\/]+[\w\s]))>))([\.\w\+\d\_\-\:]+)))?((([\.\w\+\d\_\-\:]+)?(\?|[%]+(25)?3[Ff]))([\w\d\-\_\;{}\(\)\[\]]+((\=|[%]+(25)?3[dD])([^&,\s]+(\&)?)?)?){1,})?'''
+FALv3 = '''(?:[\w]{2,10}:(?:[\\\/]|[%]+(?:25)?2[fF])+[\w\d\*\_\-\.\:]+)?(?:(?:[\.\w\d\_\-\:]+)?(?:(?:(?:[\\\/]|[%]+(?:25)?2[fF])+)(?!(?:(?:<(?:[\w\s]+[\\\/]+)|(?:[\\\/]+[\w\s]))>))(?:[\.\w\+\d\_\-\:]+)))+(?:(?:(?:[\.\w\+\d\_\-\:]+)?(?:\?|[%]+(?:25)?3[Ff]))(?:[\w\d\-\_\;{}\(\)\[\]]+(?:(?:\=|[%]+(?:25)?3[dD])(?:[^&,\s]+(?:\&)?)?)?){1,})?'''
 findAllLinksv3 = f'"{FALv3}"'
 findAllLinksv3_quotes = f'''"(?:\\"|\'){FALv3}(?:\\"|\')"'''
 findAllLinksv3_no_quotes = f'''"(?!\\"|\'){FALv3}(?!\\"|\')"'''
@@ -208,8 +208,8 @@ class Crawl():
         # uses pcregrep to find all links in the saved page, as python's "re" is very slow (because of the [^&,\s] at the end of the regex)
         # we set bit limits to prevent error while grepping links
         findv3 = check_output(f"pcregrep --match-limit 1000000000 --buffer-size 10000000 --recursion-limit 1000000000 -ao {findAllLinksv3} /tmp/crawlalllinks/{id_}.txt | sed \"s/[\\\"|']//g\"  | sort -uV", shell=True, executable='/bin/bash').decode("utf-8")
-        findv3_quotes = check_output(f"pcregrep --match-limit 1000000000 --buffer-size 10000000 --recursion-limit 1000000000 -ao {findAllLinksv3_quotes} /tmp/crawlalllinks/{id_}.txt | sed \"s/[\\\"|']//g\"  | sort -uV", shell=True, executable='/bin/bash').decode("utf-8")
-        return f"{findv3}\n{findv3_quotes}"
+        findv3_decoded = check_output(f"pcregrep --match-limit 1000000000 --buffer-size 10000000 --recursion-limit 1000000000 -ao {findAllLinksv3} /tmp/crawlalllinks/{id_}_decoded.txt | sed \"s/[\\\"|']//g\"  | sort -uV", shell=True, executable='/bin/bash').decode("utf-8")
+        return f"{findv3}\n{findv3_decoded}"
     
     def visit_n_parse_classic(self, id_, url):
         if url is None:
@@ -226,8 +226,10 @@ class Crawl():
         self.results_pages[url]["len"] = len(content)
         with open(f"/tmp/crawlalllinks/{id_}.txt", "w") as f:
             f.write(content)
+        with open(f"/tmp/crawlalllinks/{id_}_decoded.txt", "w") as f:
+            f.write(unescape(unquote(content)))
         links = self.find_all_links_v3(id_)
-        for link in links.splitlines():
+        for link in set(links.splitlines()):
             retrieved_links.add(link)
         return set(links.splitlines())
     
@@ -242,12 +244,15 @@ class Crawl():
 
         self.queue.discard(url)
         content = await self.web.get_page_content(id_)
-        logger.success(f"STATUS: {p.status} | LENGTH: {len(content)} | LINK: {url}")
+        if p:
+            logger.success(f"STATUS: {p.status} | LENGTH: {len(content)} | LINK: {url}")
         self.results_pages[url]["len"] = len(content)
         with open(f"/tmp/crawlalllinks/{id_}.txt", "w") as f:
             f.write(content)
+        with open(f"/tmp/crawlalllinks/{id_}_decoded.txt", "w") as f:
+            f.write(unescape(unquote(content)))
         links = self.find_all_links_v3(id_)
-        for link in links.splitlines():
+        for link in set(links.splitlines()):
             retrieved_links.add(link)
         return set(links.splitlines())
     
@@ -327,9 +332,11 @@ class Link(object):
         self.state = "unknown"
         if self.link.startswith("http"):
             self.state = "url_absolute"
-        elif re.findall("^[\w\d\-]+\.[\w\-\d](:[\d]+)?([/\\\]+.*)?", self.link):
+        elif re.findall("^([\\\/]{2})?[\w\d\.\-]+\.[\w\-\d]+(:[\d]+)?([\\\/]+.*)?", self.link):
+            self.state = "url_absolute_no_http"
+        elif re.findall("^[\w\d\.\-]+\.[\w\-\d]+(:[\d]+)?([\\\/]+.*)?", self.link):
             self.state = "url_relative"
-        elif re.findall("^[/\\\]+", self.link):
+        elif re.findall("^[\\\/]+", self.link):
             self.state = "path_absolute"
         elif re.findall("^[\.\w\d\-\_]+", self.link):
             self.state = "path_relative"
@@ -338,6 +345,8 @@ class Link(object):
     def format_link(self):
         if self.state == "url_absolute":
             self.recreated_link = self.link
+        elif self.state == "url_absolute_no_http":
+            self.recreated_link = f"{self.full_url.split('://')[0]}:{self.link}"
         elif self.state == "url_relative":
             self.recreated_link = f"{self.full_url.split('://')[0]}://{self.link}"
         elif self.state == "path_absolute":
@@ -459,7 +468,7 @@ async def main_headless(args):
                 continue
 
             more_urls = set()
-            if args.find_mode and len(args.find_more) > 0:
+            if args.find_more and len(args.find_more) > 0:
                 more_urls = try_find_more_urls(link_, args.find_more)
 
             # print(f"{link} - {type_of_link} - {full_url}")
