@@ -1,9 +1,9 @@
 import asyncio
-from distutils import extension
 from pyppeteer import launch
 from subprocess import check_output
 from loguru import logger
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse, unquote
+from html import unescape
 import re
 import requests
 import argparse
@@ -13,9 +13,12 @@ import signal
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-findAllLinksv2= '''"(?:\\"|')([\w]{2,10}:[\\\/]+[\w\d\*\_\-\.\:]+)?((([\\\/]+)([\.\w\d\_\-\:]+)((?![\.\w\d\_\-\:]+)[\\\/]+)?)+|(([\.\w\d\_\-\:]+)([\\\/]+)((?![\\\/]+)[\.\w\d\_\-\:]+)?)+)?(\?([\w\d\-\_\;{}()\[\]]+(\=([^&,\s]+(\&)?)?)?){0,})?(?:\\"|')"'''
-findAllLinksv3 = '''"([\w]{2,10}:([\\\/]|[%]+(25)?2[fF])+[\w\d\*\_\-\.\:]+)?(([\.\w\d\_\-\:]+)?((([\\\/]|[%]+(25)?2[fF])+)(?![\w]+>)([\.\w\d\_\-\:]+())))?((([\.\w\d\_\-\:]+)?\?|[%]+(25)?3[Ff])([\w\d\-\_\;{}\(\)\[\]]+((\=|[%]+(25)?3[dD])([^&,\s]+(\&)?)?)?){1,})?"'''
-findAllLinksv3_quotes = '''"(?:\\"|\')([\w]{2,10}:([\\\/]|[%]+(25)?2[fF])+[\w\d\*\_\-\.\:]+)?(([\.\w\d\_\-\:]+)?((([\\\/]|[%]+(25)?2[fF])+)(?![\w]+>)([\.\w\d\_\-\:]+())))?((([\.\w\d\_\-\:]+)?\?|[%]+(25)?3[Ff])([\w\d\-\_\;{}\(\)\[\]]+((\=|[%]+(25)?3[dD])([^&,\s]+(\&)?)?)?){1,})?(?:\\"|\')"'''
+FALv2= '''(?:\\"|')([\w]{2,10}:[\\\/]+[\w\d\*\_\-\.\:]+)?((([\\\/]+)([\.\w\d\_\-\:]+)((?![\.\w\d\_\-\:]+)[\\\/]+)?)+|(([\.\w\d\_\-\:]+)([\\\/]+)((?![\\\/]+)[\.\w\d\_\-\:]+)?)+)?(\?([\w\d\-\_\;{}()\[\]]+(\=([^&,\s]+(\&)?)?)?){0,})?(?:\\"|')'''
+FALv3 = '''(?:[\w]{2,10}:(?:[\\\/]|[%]+(?:25)?2[fF])+[\w\d\*\_\-\.\:]+)?(?:(?:[\.\w\d\_\-\:]+)?(?:(?:(?:[\\\/]|[%]+(?:25)?2[fF])+)(?!(?:(?:<(?:[\w\s]+[\\\/]+)|(?:[\\\/]+[\w\s]))>))(?:[\.\w\+\d\_\-\:]+)))+(?:(?:(?:[\.\w\+\d\_\-\:]+)?(?:\?|[%]+(?:25)?3[Ff]))(?:[\w\d\-\_\;{}\(\)\[\]]+(?:(?:\=|[%]+(?:25)?3[dD])(?:[^&,\s]+(?:\&)?)?)?){1,})?'''
+findAllLinksv3 = f'"{FALv3}"'
+findAllLinksv3_quotes = f'''"(?:\\"|\'){FALv3}(?:\\"|\')"'''
+findAllLinksv3_no_quotes = f'''"(?!\\"|\'){FALv3}(?!\\"|\')"'''
+
 
 GARBAGE_EXTENSIONS = [
     "ico",
@@ -205,8 +208,8 @@ class Crawl():
         # uses pcregrep to find all links in the saved page, as python's "re" is very slow (because of the [^&,\s] at the end of the regex)
         # we set bit limits to prevent error while grepping links
         findv3 = check_output(f"pcregrep --match-limit 1000000000 --buffer-size 10000000 --recursion-limit 1000000000 -ao {findAllLinksv3} /tmp/crawlalllinks/{id_}.txt | sed \"s/[\\\"|']//g\"  | sort -uV", shell=True, executable='/bin/bash').decode("utf-8")
-        findv3_quotes = check_output(f"pcregrep --match-limit 1000000000 --buffer-size 10000000 --recursion-limit 1000000000 -ao {findAllLinksv3_quotes} /tmp/crawlalllinks/{id_}.txt | sed \"s/[\\\"|']//g\"  | sort -uV", shell=True, executable='/bin/bash').decode("utf-8")
-        return f"{findv3}\n{findv3_quotes}"
+        findv3_decoded = check_output(f"pcregrep --match-limit 1000000000 --buffer-size 10000000 --recursion-limit 1000000000 -ao {findAllLinksv3} /tmp/crawlalllinks/{id_}_decoded.txt | sed \"s/[\\\"|']//g\"  | sort -uV", shell=True, executable='/bin/bash').decode("utf-8")
+        return f"{findv3}\n{findv3_decoded}"
     
     def visit_n_parse_classic(self, id_, url):
         if url is None:
@@ -214,15 +217,19 @@ class Crawl():
         p = self.web.page_goto(id_, url)
         try:
             self.add_visited({url}, status=p.status_code, headers=p.headers)
+            logger.success(f"STATUS: {p.status_code} | LENGTH: {len(p.text)} | LINK: {url}")
         except:
             self.add_failed({url})
+            logger.warning(f"STATUS: FAIL | LINK: {url}")
         self.queue.discard(url)
         content = self.web.get_page_content(id_)
         self.results_pages[url]["len"] = len(content)
         with open(f"/tmp/crawlalllinks/{id_}.txt", "w") as f:
             f.write(content)
+        with open(f"/tmp/crawlalllinks/{id_}_decoded.txt", "w") as f:
+            f.write(unescape(unquote(content)))
         links = self.find_all_links_v3(id_)
-        for link in links.splitlines():
+        for link in set(links.splitlines()):
             retrieved_links.add(link)
         return set(links.splitlines())
     
@@ -230,16 +237,22 @@ class Crawl():
         p = await self.web.page_goto(id_, url)
         try:
             self.add_visited({url}, status=p.status, headers=p.headers)
+            
         except:
             self.add_failed({url})
+            logger.warning(f"STATUS: FAIL | LINK: {url}")
 
         self.queue.discard(url)
         content = await self.web.get_page_content(id_)
+        if p:
+            logger.success(f"STATUS: {p.status} | LENGTH: {len(content)} | LINK: {url}")
         self.results_pages[url]["len"] = len(content)
         with open(f"/tmp/crawlalllinks/{id_}.txt", "w") as f:
             f.write(content)
+        with open(f"/tmp/crawlalllinks/{id_}_decoded.txt", "w") as f:
+            f.write(unescape(unquote(content)))
         links = self.find_all_links_v3(id_)
-        for link in links.splitlines():
+        for link in set(links.splitlines()):
             retrieved_links.add(link)
         return set(links.splitlines())
     
@@ -319,9 +332,11 @@ class Link(object):
         self.state = "unknown"
         if self.link.startswith("http"):
             self.state = "url_absolute"
-        elif re.findall("^[\w\d\-]+\.[\w\-\d](:[\d]+)?([/\\\]+.*)?", self.link):
+        elif re.findall("^([\\\/]{2})?[\w\d\.\-]+\.[\w\-\d]+(:[\d]+)?([\\\/]+.*)?", self.link):
+            self.state = "url_absolute_no_http"
+        elif re.findall("^[\w\d\.\-]+\.[\w\-\d]+(:[\d]+)?([\\\/]+.*)?", self.link):
             self.state = "url_relative"
-        elif re.findall("^[/\\\]+", self.link):
+        elif re.findall("^[\\\/]+", self.link):
             self.state = "path_absolute"
         elif re.findall("^[\.\w\d\-\_]+", self.link):
             self.state = "path_relative"
@@ -330,6 +345,8 @@ class Link(object):
     def format_link(self):
         if self.state == "url_absolute":
             self.recreated_link = self.link
+        elif self.state == "url_absolute_no_http":
+            self.recreated_link = f"{self.full_url.split('://')[0]}:{self.link}"
         elif self.state == "url_relative":
             self.recreated_link = f"{self.full_url.split('://')[0]}://{self.link}"
         elif self.state == "path_absolute":
@@ -370,16 +387,14 @@ def load_headers(headers_string):
         headers[header_name] = value
     return headers
 
-def try_find_more_urls(link_):
+def try_find_more_urls(link_, modes=[]):
     more_urls = set()
     extension_ = link_.get_link_extension()
-    if extension_ == "js":
-        logger.debug(f"Trying to find js.map file")
+    if extension_ == "js" and "map" in modes:
         parsed_link = urlparse(str(link_))
         js_map = urlunparse(parsed_link._replace(path=f"{parsed_link.path}.map"))
         more_urls.add(js_map)
-    elif extension_ in ["php", "asp", "aspx"]:
-        logger.debug(f"trying to find backup files") 
+    elif extension_ in ["php", "asp", "aspx"] and "bak" in modes:
         parsed_link = urlparse(str(link_))
         path_no_extension = os.path.join(
                                 "/".join(os.path.split(parsed_link.path)[:-1]),
@@ -453,8 +468,8 @@ async def main_headless(args):
                 continue
 
             more_urls = set()
-            if args.find_more:
-                more_urls = try_find_more_urls(link_)
+            if args.find_more and len(args.find_more) > 0:
+                more_urls = try_find_more_urls(link_, args.find_more)
 
             # print(f"{link} - {type_of_link} - {full_url}")
 
@@ -534,8 +549,8 @@ def main_classic(args):
                 continue
             
             more_urls = set()
-            if args.find_more:
-                more_urls = try_find_more_urls(link_)
+            if args.find_more and len(args.find_more) > 0:
+                more_urls = try_find_more_urls(link_, args.find_more)
 
             # print(f"{link} - {type_of_link} - {full_url}")
             
@@ -581,7 +596,7 @@ def get_arguments():
     parser.add_argument("-H", "--header", type=str, help="Headers to send", action='append', default=[])
     parser.add_argument("--timeout", type=int, help="Timeout for fetching web page", default=35)
     parser.add_argument("-ch", "--chrome-headless", help="Use a headless browser to run the crawler", action="store_true", default=False)
-    parser.add_argument("-fm", "--find-more", help="Try some techniques to get more interesting results", action="store_true", default=False)
+    parser.add_argument("-fm", "--find-more", help="Try some techniques to get more interesting results", action="append", choices=["map", "bak"])
     parser.add_argument("-r", "--restrict-exts", action="append", help="Restrict extensions to these", default=None)
     parser.add_argument("-rs", "--remove_siblings", action="store_true", help="Clean te output bu filtering statuscode and len to keep only 1 reprensative of each status-len", default=False)
 
