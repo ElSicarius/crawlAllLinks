@@ -1,5 +1,5 @@
 import asyncio
-from pyppeteer import launch
+from pyppeteer import launch, connect
 from subprocess import check_output
 from loguru import logger
 from urllib.parse import urlparse, urlunparse, unquote
@@ -55,12 +55,9 @@ class Handlers():
         self.new_headers = {k.lower(): v for k,v in new_headers.items()}
 
     def request_handler(self, request):
-        for k, v in self.new_headers.items():
-            request.headers.setdefault(k, v)
-            request.headers[k] = self.new_headers[k]
-        asyncio.create_task(request.continue_({
-        "headers": request.headers,
-    }))
+        # if request.url.endswith('.png') or request.url.endswith('.jpg'):
+        #     await request.abort()
+        asyncio.create_task(request.continue_())
 
 class Web_classic():
 
@@ -129,6 +126,8 @@ class Web_classic():
 class Web_headless():
     def __init__(self, forced_headers = {}, 
             timeout=30,
+            attach_to_existing_chrome=False,
+            open_new_tabs=False,
             pyppeteer_args={"headless": True, "ignoreHTTPSErrors": True, "handleSIGTERM": False, "handleSIGINT": False, "executablePath": "/usr/bin/chromium-browser", "devtools": False, "args": ["--no-sandbox"]},):
             
         self.pyppeteer_args = pyppeteer_args
@@ -136,6 +135,8 @@ class Web_headless():
         self.results = dict()
         self.forced_headers = forced_headers
         self.timeout = timeout
+        self.attach_to_existing_chrome = attach_to_existing_chrome
+        self.open_new_tabs = open_new_tabs
         self.Handlers = Handlers(new_headers=forced_headers)
         self.mime_types = self.get_mime_types()
     
@@ -157,23 +158,46 @@ class Web_headless():
         return mimes
     
     async def start_browser(self,):
-        self.browser = await launch(self.pyppeteer_args)
+        if self.attach_to_existing_chrome:
+            logger.debug(f"Attaching to chrome on port {self.attach_to_existing_chrome}")
+            self.browser = await connect(browserURL=f'http://127.0.0.1:{self.attach_to_existing_chrome}')
+        else:
+            self.browser = await launch(self.pyppeteer_args)
     
     async def new_page(self):
-        self.pages.append(await self.browser.newPage())
-        id_ = len(self.pages) - 1
-        await self.pages[id_].setViewport({'width': 1920, 'height': 1080})
-        # set request handler to override headers when request
-        await self.pages[id_].setRequestInterception(True)
-        self.pages[id_].on("request", self.Handlers.request_handler)
+        if self.open_new_tabs:
+            logger.debug("Spawning new page for link")
+            self.pages.append(await self.browser.newPage())
+            id_ = len(self.pages) - 1
+            await self.pages[id_].setViewport({'width': 1920, 'height': 1080})
+            # set request handler to override headers when request
+            await self.pages[id_].setRequestInterception(True)
+            self.pages[id_].on("request", self.Handlers.request_handler)
 
-        self.pages[id_].setDefaultNavigationTimeout(self.timeout * 1000)
+            self.pages[id_].setDefaultNavigationTimeout(self.timeout * 1000)
 
-        self.results.setdefault(id_, dict())
+            self.results.setdefault(id_, dict())
+        else:
+            pages = await self.browser.pages()
+            if len(pages) == 0:
+                logger.debug("There is no current page, Spawning new page for link")
+                self.pages.append(await self.browser.newPage())
+                await self.pages[id_].setViewport({'width': 1920, 'height': 1080})
+                # set request handler to override headers when request
+                await self.pages[id_].setRequestInterception(True)
+                self.pages[id_].on("request", self.Handlers.request_handler)
+
+                self.pages[id_].setDefaultNavigationTimeout(self.timeout * 1000)
+
+                self.results.setdefault(id_, dict())
+            id_ = 0
         return id_
     
-    async def page_goto(self, id, url):
+    async def page_goto(self, id, url, headers={}):
         try:
+            h = self.forced_headers.copy()
+            h.update(headers)
+            await self.pages[id].setExtraHTTPHeaders(h)
             p = await self.pages[id].goto(url, waitUntil="networkidle2")
         except Exception as e:
             logger.error(f"Error: {e}")
@@ -423,7 +447,7 @@ def try_find_more_urls(link_, modes=[]):
     return more_urls
 
 async def main_headless(args):
-    veb = Web_headless(load_headers(args.header), timeout=args.timeout)
+    veb = Web_headless(load_headers(args.header), timeout=args.timeout, open_new_tabs=args.new_tabs_only, attach_to_existing_chrome=args.chrome_remote_debug)
     crawler = Crawl(web=veb, url=args.url, filter_output_duplicates=args.remove_siblings, restricted_exts=args.restrict_exts)
 
     init_url_parsed = urlparse(args.url)
@@ -489,13 +513,15 @@ async def main_headless(args):
     while len(crawler.queue) > 0 and len(crawler.fails) < args.max_fails and len(crawler.visited | crawler.fails) < args.max_visits:
         url = crawler.queue.pop()
         logger.debug(f"Next page to crawl: {url}")
-
+        # open new tab or use the existing one
+        id_ = await veb.new_page()
         links = await crawler.visit_n_parse_headless(id_, url)
         crawler.add_queue(get_next_urls(links))
         if not args.quiet:
             crawler.print_status()
-    
-    await veb.close_browser()
+    if not args.keep_chrome:
+
+        await veb.close_browser()
 
     crawler.write_results()
     if not args.quiet:
@@ -598,8 +624,10 @@ def get_arguments():
     parser.add_argument("-ch", "--chrome-headless", help="Use a headless browser to run the crawler", action="store_true", default=False)
     parser.add_argument("-fm", "--find-more", help="Try some techniques to get more interesting results", action="append", choices=["map", "bak"])
     parser.add_argument("-r", "--restrict-exts", action="append", help="Restrict extensions to these", default=None)
-    parser.add_argument("-rs", "--remove_siblings", action="store_true", help="Clean te output bu filtering statuscode and len to keep only 1 reprensative of each status-len", default=False)
-
+    parser.add_argument("-rs", "--remove-siblings", action="store_true", help="Clean te output bu filtering statuscode and len to keep only 1 reprensative of each status-len", default=False)
+    parser.add_argument("--new-tabs-only", action="store_true", help="Open new tabs for each payload on chrome (headless or remote debug)", default=False)
+    parser.add_argument("--chrome-remote-debug", help="Specify an existing and openned chrome remote debug port", default=None)
+    parser.add_argument("--keep-chrome", help="Don't close chrome/ium at the end of the crawling process", default=False, action="store_true")
 
     return parser.parse_args()
 
